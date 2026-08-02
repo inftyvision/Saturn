@@ -33,9 +33,9 @@ import {
   Map as MlMap,
   Marker,
   Popup,
-  AttributionControl,
   LngLatBounds,
   addProtocol,
+  setWorkerUrl,
   type GeoJSONSource,
 } from 'maplibre-gl';
 import { Protocol as PmtilesProtocol } from 'pmtiles';
@@ -54,6 +54,42 @@ function ensurePmtilesProtocol() {
   if (pmtilesRegistered || typeof window === 'undefined') return;
   addProtocol('pmtiles', new PmtilesProtocol().tile);
   pmtilesRegistered = true;
+}
+
+/**
+ * Point MapLibre at its tile-parsing Web Worker explicitly, instead of
+ * trusting its own `new URL('./${workerName}', import.meta.url)` autodetect
+ * — and at a copy in `public/`, not at Turbopack's own build of the file.
+ *
+ * Two separate Turbopack bugs stack here. First: the library's own worker
+ * lookup picks the filename with a runtime ternary (dev vs prod build), and
+ * Turbopack's `new URL(x, import.meta.url)` → static-asset rewrite only
+ * works when `x` is a literal string — with a ternary it can't tell which
+ * file is meant and silently resolves to the URL of maplibre-gl's own main
+ * module instead of either worker file. A literal path fixes that part.
+ * Second, worse: even Turbopack's OWN correctly-built copy of the worker
+ * file is broken, because that build step copies the `.mjs` as a static
+ * asset without rewriting the `import … from "./maplibre-gl-shared.mjs"`
+ * inside it to the hashed filename Turbopack actually gave that sibling
+ * file — so the worker's own module graph 404s the instant it tries to
+ * load, and the whole worker script never executes a single line, not even
+ * its own `self.worker = …` setup. No console error surfaces this: main
+ * thread module-worker construction doesn't throw for a script that fails
+ * to import, it just leaves the worker permanently inert. Every message
+ * MapLibre posts to it (tile loads included) sits unanswered forever — no
+ * timeout, no rejection, no error, just `isSourceLoaded('protomaps')`
+ * never becoming true. Only the paint-only `background` layer needs no
+ * worker and renders fine, which is the flat grey this guards against.
+ * Serving a plain, unhashed copy of both files together from `public/`
+ * (same pattern as `guyana.pmtiles`) sidesteps Turbopack's asset pipeline
+ * for this file entirely, so the relative import between them resolves
+ * exactly as it does in the installed package.
+ */
+let workerUrlSet = false;
+function ensureMaplibreWorkerUrl() {
+  if (workerUrlSet || typeof window === 'undefined') return;
+  setWorkerUrl(new URL('/maplibre-gl-worker.mjs', window.location.origin).href);
+  workerUrlSet = true;
 }
 
 export interface MapSite {
@@ -195,6 +231,9 @@ export function FleetMap({
    *  Mode's synchronous mount→cleanup→mount rehearsal rather than a real
    *  unmount — see below. */
   const removeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Surfaced on the map itself rather than only the console — a basemap
+   *  that fails silently just looks empty, with nothing to report back. */
+  const [mapError, setMapError] = useState<string | null>(null);
 
   useEffect(() => {
     if (removeTimer.current) {
@@ -247,6 +286,7 @@ export function FleetMap({
     );
 
     ensurePmtilesProtocol();
+    ensureMaplibreWorkerUrl();
 
     const accent = brandColor('--primary', '#9AE600');
     const muted = brandColor('--muted-foreground', '#6B7280');
@@ -282,20 +322,23 @@ export function FleetMap({
       attributionControl: false,
     });
     map.current = m;
-    if (typeof window !== 'undefined') (window as any).__debugMap = m;
-    m.on('error', (e) => console.error('[FleetMap] maplibre error', e.error, e.error?.stack));
-    for (const evt of ['styledata', 'sourcedata', 'dataloading', 'style.load', 'idle', 'render']) {
-      let count = 0;
-      m.on(evt as any, () => {
-        count++;
-        if (count <= 3) console.log(`[FleetMap] event ${evt} #${count}`);
-      });
-    }
-    // No zoom/compass widget — MapLibre's stock control is unstyled chrome
-    // that doesn't wear the app's design at all, and pinch/scroll already
-    // zoom without it. Attribution stays: it's the one control here that's
-    // not decoration, it's the licence term for the free OSM data.
-    m.addControl(new AttributionControl({ compact: true }));
+    // No zoom/compass widget, no attribution control — MapLibre's stock
+    // controls are unstyled chrome that doesn't wear the app's design.
+    // Pinch/scroll already zoom with no widget needed.
+
+    // Surface load failures on the map itself. A vector source that fails
+    // to fetch, decode, or match its style just renders the bare background
+    // colour with no visual difference from "still loading" — indistinguishable
+    // to whoever's looking at it. `error` catches hard failures (bad tile,
+    // network error); the 8s timeout catches the softer case where nothing
+    // ever errors but the source also never finishes loading.
+    m.on('error', (e) => setMapError(e.error?.message ?? String(e.error)));
+    const staleTimer = setTimeout(() => {
+      if (!m.isSourceLoaded('protomaps')) {
+        setMapError('Basemap tiles have not finished loading after 8s — check the guyana.pmtiles request in devtools.');
+      }
+    }, 8000);
+    m.once('idle', () => clearTimeout(staleTimer));
 
     // The 2.5D tilt, applied AFTER construction rather than as a constructor
     // option. Passing `pitch` alongside `bounds` corrupts the initial camera
@@ -402,6 +445,7 @@ export function FleetMap({
     });
 
     return () => {
+      clearTimeout(staleTimer);
       // Deferred rather than immediate — see the Strict Mode note at the top
       // of this effect. A real unmount still tears down normally, just one
       // tick later; a Strict Mode rehearsal cancels this before it fires.
@@ -522,13 +566,20 @@ export function FleetMap({
   }, [vehicles, onVehicleClick]);
 
   return (
-    <div
-      ref={el}
-      style={fill ? undefined : { height }}
-      className={`w-full overflow-hidden [&_.maplibregl-ctrl-attrib]:text-[10px] ${
-        fill ? 'min-h-0 flex-1' : 'rounded-lg border'
-      }`}
-    />
+    <div className={`relative w-full ${fill ? 'min-h-0 flex-1' : ''}`}>
+      <div
+        ref={el}
+        style={fill ? undefined : { height }}
+        className={`h-full w-full overflow-hidden [&_.maplibregl-ctrl-attrib]:text-[10px] ${
+          fill ? '' : 'rounded-lg border'
+        }`}
+      />
+      {mapError && (
+        <div className="absolute inset-x-2 top-2 z-10 rounded-md border border-destructive/40 bg-destructive/90 px-3 py-2 text-xs text-destructive-foreground">
+          Basemap failed to load: {mapError}
+        </div>
+      )}
+    </div>
   );
 }
 
