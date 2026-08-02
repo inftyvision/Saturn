@@ -1,0 +1,13 @@
+services:
+  # Routing only. Preprocessing (osrm-extract, osrm-contract) is a one-time
+  # step run by hand — see README — because it needs the source .osm.pbf and
+  # only has to happen again when that data changes, not on every boot.
+  routed:
+    image: osrm/osrm-backend
+    container_name: gaia-osrm
+    command: osrm-routed --algorithm ch /data/guyana-latest.osrm
+    ports:
+      - '5555:5000'
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

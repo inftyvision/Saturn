@@ -1,0 +1,81 @@
+# vessel — TestFlight lane. Ported from apps/sy.
+#
+# ONE LANE, N APPS. Every field that differs between brands is already an env
+# var here, so shipping brand N is a matter of supplying that brand's secrets —
+# not a second Fastfile. The CI workflow matrixes over brands and namespaces the
+# secrets per slug.
+#
+# That matters because separability is a requirement: some of these apps ship
+# under Syvon's developer account, some under a partner's, and some under the
+# customer's own (which is what Apple's template-app rule asks for when the
+# workspace is not ours). APPLE_TEAM_ID + the ASC key ARE the account — nothing
+# else in this file assumes whose it is.
+#
+# Signing = Xcode cloud-managed (CODE_SIGN_STYLE=Automatic in the project +
+# `-allowProvisioningUpdates` + App Store Connect API key) — no cert/profile
+# repo, no keychain juggling on the ephemeral runner. The API key can register
+# the bundle id + create profiles on first run, which is what makes a brand's
+# first build a no-touch operation.
+#
+# Required env (per brand, set by the CI workflow):
+#   ASC_KEY_ID / ASC_ISSUER_ID — App Store Connect API key identifiers
+#   ASC_KEY_P8                 — the .p8 key content, base64-encoded
+#   ASC_KEY_PATH               — absolute path to the decoded .p8 on disk
+#   APPLE_TEAM_ID              — developer team id
+#   BUILD_NUMBER               — monotonic CFBundleVersion (github.run_number);
+#                                every TestFlight upload MUST increment it
+
+default_platform(:ios)
+
+platform :ios do
+  desc "Build the Capacitor shell and upload to TestFlight"
+  lane :beta do
+    # Use the decoded .p8 ON DISK. Do NOT pass `key_content` base64: fastlane
+    # 2.236.0 reverted the base64→.p8 decode for altool (PR #30066), so altool
+    # received the raw base64 and died with "isn't in the correct format (259)".
+    # Pointing at the real file sidesteps that regardless of fastlane version.
+    api_key = app_store_connect_api_key(
+      key_id: ENV.fetch("ASC_KEY_ID"),
+      issuer_id: ENV.fetch("ASC_ISSUER_ID"),
+      key_filepath: ENV.fetch("ASC_KEY_PATH"),
+    )
+
+    increment_build_number(
+      build_number: ENV.fetch("BUILD_NUMBER"),
+      xcodeproj: "App.xcodeproj",
+    )
+
+    auth_xcargs = [
+      "-allowProvisioningUpdates",
+      "-authenticationKeyPath #{ENV.fetch('ASC_KEY_PATH')}",
+      "-authenticationKeyID #{ENV.fetch('ASC_KEY_ID')}",
+      "-authenticationKeyIssuerID #{ENV.fetch('ASC_ISSUER_ID')}",
+      "DEVELOPMENT_TEAM=#{ENV.fetch('APPLE_TEAM_ID')}",
+    ].join(" ")
+
+    build_app(
+      workspace: "App.xcworkspace",
+      scheme: "App",
+      configuration: "Release",
+      export_method: "app-store",
+      output_directory: "build",
+      xcargs: auth_xcargs,
+      # gym auto-passes the ASC API key auth args to the export invocation when
+      # an api_key is in lane context — repeating them errors ("may only be
+      # provided once"). Only the provisioning flag belongs here.
+      export_xcargs: "-allowProvisioningUpdates",
+      export_options: {
+        signingStyle: "automatic",
+        teamID: ENV.fetch("APPLE_TEAM_ID"),
+      },
+    )
+
+    upload_to_testflight(
+      api_key: api_key,
+      # Processing takes ~10–30 min server-side; don't burn runner minutes
+      # waiting. ITSAppUsesNonExemptEncryption=false in Info.plist means no
+      # per-build compliance prompt.
+      skip_waiting_for_build_processing: true,
+    )
+  end
+end

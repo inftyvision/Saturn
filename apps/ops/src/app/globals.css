@@ -1,0 +1,217 @@
+@import 'tailwindcss';
+/* MapLibre ships its own stylesheet — without it the canvas renders but every
+ * control, popup and attribution box is unstyled. */
+@import 'maplibre-gl/dist/maplibre-gl.css';
+
+/* @gaia/ui lives outside this app's directory, so Tailwind cannot see the
+ * classes it authors. Without this the shared components ship with their markup
+ * and none of their styles — which looks like a broken build, not a missing
+ * @source. */
+@source "../../../../packages/ui/src";
+
+/**
+ * shadcn triplets → Tailwind v4 utilities.
+ *
+ * `inline` matters: it compiles `bg-primary` to `hsl(var(--primary))` directly
+ * rather than to `var(--color-primary)`. That means the HSL triplets are the
+ * ONE source — utilities and the components' own raw `hsl(var(--border))` both
+ * resolve to the same value, and there is no second definition to drift.
+ *
+ * The triplets themselves come from the brand, emitted at request time by
+ * `brandCss()` → `shadcnVars()`. The `:root` block below is only the floor.
+ */
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-display: var(--gaia-font-display);
+  --font-body: var(--gaia-font-body);
+  /* Mono is for SMALL TEXT ONLY — kickers, captions, and figures compared down
+   * a column. Never body, never buttons: at reading size a mono face costs
+   * legibility and rhythm for no gain, and a mono button reads as a terminal.
+   *
+   * `--font-mdio` is what the vendored Button and Badge carry from the shadcn
+   * theme they were generated against, so it must resolve to the BODY stack.
+   * Pointing it at mono was one line away from monospacing every control. */
+  --font-mono: var(--gaia-font-mono);
+  --font-mdio: var(--gaia-font-body);
+}
+
+/**
+ * The floor only. The real palette is emitted by `lib/brand.ts` into a <style>
+ * in the root layout, from a design-tokens/v2 set — the same shape and the same
+ * `shadcnVars` mapping `apps/buyer` uses for a vendor's tokens.
+ *
+ * These values exist so a screen rendered before that <style> (or with it
+ * removed) is plain rather than unstyled.
+ */
+:root {
+  --background: 0 0% 5%;
+  --foreground: 0 0% 98%;
+  --card: 0 0% 9%;
+  --card-foreground: 0 0% 98%;
+  --popover: 0 0% 9%;
+  --popover-foreground: 0 0% 98%;
+  --primary: 78 100% 45%;
+  --primary-foreground: 0 0% 4%;
+  --secondary: 0 0% 14%;
+  --secondary-foreground: 0 0% 98%;
+  --muted: 0 0% 14%;
+  --muted-foreground: 0 0% 63%;
+  --accent: 0 0% 14%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 0 0% 16%;
+  --input: 0 0% 16%;
+  --ring: 78 100% 45%;
+  --radius: 8px;
+
+  --gaia-font-display: system-ui, sans-serif;
+  --gaia-font-body: system-ui, sans-serif;
+  --gaia-font-kicker: system-ui, sans-serif;
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+/* Icons are ligatures — in any fallback face the browser paints the ligature's
+ * NAME (`photo_camera`, `lock`) instead of a glyph. Hidden, not display:none,
+ * so the control keeps its box and nothing reflows when the glyphs arrive.
+ * Cleared by ICON_BOOT in layout.tsx, which reveals unconditionally after 3s. */
+html[data-icons='wait'] .material-symbols-outlined {
+  visibility: hidden;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: var(--gaia-font-body);
+  -webkit-font-smoothing: antialiased;
+  /* The shell renders in a WKWebView with contentInset: 'never' — safe areas
+     are ours to honour or content sits under the notch. */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+}
+
+/* A native shell should not feel like a web page. Selection and callouts are
+   disabled on touch only — a coordinator on a desktop still needs to copy a
+   docket number out of a table. */
+@media (pointer: coarse) {
+  body {
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: none;
+  }
+  .selectable {
+    -webkit-touch-callout: default;
+    user-select: text;
+  }
+}
+
+/* Driver surfaces are used one-handed, in sunlight, sometimes in gloves.
+   Anything a driver taps gets a floor well above the 44px minimum. */
+.tap-target {
+  min-height: 56px;
+}
+
+/* The kicker — the small uppercase label above a title.
+ *
+ * Lifted from the brand's own text-styles rather than invented: caption size,
+ * body weight, wide tracking, uppercase. It is the one repeated typographic
+ * move in the product, so it is a class rather than five near-identical
+ * Tailwind strings that drift apart.
+ */
+.kicker {
+  font-family: var(--gaia-font-kicker);
+  font-size: 0.6875rem;
+  line-height: 1.2;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+}
+
+/* Figures compared down a column — docket numbers, plates, money, times.
+ * Tabular so digits keep a fixed advance and the odd one out is scannable. */
+.figure {
+  font-family: var(--gaia-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── shell motion ──────────────────────────────────────────────────────────
+ *
+ * The four movements the app shell makes. Kept here rather than as inline
+ * styles in `@gaia/ui` because keyframes cannot be inlined, and duplicated into
+ * both apps' globals because each app owns its own stylesheet — `@source`
+ * pulls the library's CLASSES in, not its at-rules.
+ *
+ * All of them respect `prefers-reduced-motion` at the bottom of this block.
+ */
+
+/* The agent composing. Not a spinner: a spinner means "something, for a
+   while", and this means "it is writing". */
+@keyframes gaia-pulse {
+  0%, 80%, 100% { opacity: 0.25; }
+  40% { opacity: 1; }
+}
+
+/* The side menu, in from the right over the card. */
+@keyframes gaia-slide-in {
+  from { transform: translateX(6%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.gaia-side-panel {
+  animation: gaia-slide-in 240ms cubic-bezier(0.32, 0, 0.15, 1);
+}
+
+/* The agent layer rising over the surface. Slower and from below — it is a
+   surface arriving, not a menu opening. */
+@keyframes gaia-layer-in {
+  from { transform: translateY(12px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.gaia-layer {
+  animation: gaia-layer-in 280ms cubic-bezier(0.32, 0, 0.15, 1);
+}
+
+/* A block of an answer landing. Each one arrives on its own, which is what
+   makes a reply read as composed rather than pasted. */
+@keyframes gaia-block-in {
+  from { transform: translateY(4px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gaia-side-panel,
+  .gaia-layer {
+    animation: none;
+  }
+}
