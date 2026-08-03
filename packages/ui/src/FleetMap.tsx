@@ -149,6 +149,18 @@ function circle(lng: number, lat: number, radiusM: number, steps = 48) {
   return coords;
 }
 
+/** Metres between two `[lng, lat]` points — used to decide whether a route's
+ *  endpoint is close enough to a site to skip drawing the gap between them. */
+function haversineM(a: [number, number], b: [number, number]): number {
+  const R = 6_371_000;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(b[1] - a[1]);
+  const dLng = toRad(b[0] - a[0]);
+  const h =
+    Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a[1])) * Math.cos(toRad(b[1])) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
 /** A stale fix is not a position — it is a question. 15 min is the threshold the
  *  exception queue uses, so the map and the queue agree. */
 const STALE_MIN = 15;
@@ -222,6 +234,15 @@ export function FleetMap({
   const el = useRef<HTMLDivElement | null>(null);
   const map = useRef<MlMap | null>(null);
   const resizeObs = useRef<ResizeObserver | null>(null);
+  /** Set once the style JSON itself has loaded — NOT once every source has,
+   *  which is what `isStyleLoaded()`/the `'load'` event actually gate on.
+   *  A live-ticking vehicle trail source updates every 2.5s forever (see
+   *  `useLiveVehicles`), so `Map.loaded()` can be perpetually false and
+   *  `'load'` can permanently never fire on a screen with an in-transit
+   *  vehicle — which silently meant `sites`/`corridor` never got added at
+   *  all. `'style.load'` fires once, immediately, independent of any
+   *  source's state. */
+  const styleReady = useRef(false);
   /** Trail source/layer ids currently on the map, so a stale one can be
    *  pruned when a vehicle's trail disappears rather than left behind. */
   const trailIds = useRef<Set<string>>(new Set());
@@ -338,7 +359,15 @@ export function FleetMap({
         setMapError('Basemap tiles have not finished loading after 8s — check the guyana.pmtiles request in devtools.');
       }
     }, 8000);
-    m.once('idle', () => clearTimeout(staleTimer));
+    // Reaching idle means loading actually finished — including, on a slow
+    // first compile, finishing *after* the 8s timeout above already set a
+    // banner. Without this the banner never clears even once the exact
+    // thing it warned about has resolved, permanently misreporting a map
+    // that ends up loading fine as broken.
+    m.once('idle', () => {
+      clearTimeout(staleTimer);
+      setMapError(null);
+    });
 
     // The 2.5D tilt, applied AFTER construction rather than as a constructor
     // option. Passing `pitch` alongside `bounds` corrupts the initial camera
@@ -369,7 +398,8 @@ export function FleetMap({
     ro.observe(el.current);
     resizeObs.current = ro;
 
-    m.on('load', () => {
+    m.once('style.load', () => {
+      styleReady.current = true;
       // ── site boundaries ────────────────────────────────────────────────
       m.addSource('sites', {
         type: 'geojson',
@@ -441,6 +471,45 @@ export function FleetMap({
               // Drawing it solid would imply we know the road.
               { 'line-color': muted, 'line-width': 1.2, 'line-dasharray': [3, 3] },
         }, 'site-fill');
+
+        // OSRM snaps each endpoint to the nearest road it actually has, and
+        // a site's own coordinate — a pit's access track, a delivery site's
+        // exact frontage — is rarely ON that road. Left alone, the corridor
+        // floats a gap short of both markers instead of touching them. Same
+        // honesty rule as the no-route fallback above: dashed for the
+        // stretch nobody routed, solid stays solid for the stretch that is
+        // a real road. Skipped when the gap is small enough to be noise.
+        if (hasRoute) {
+          const routeCoords = route!;
+          const gaps: { id: string; from: [number, number]; to: [number, number] }[] = [
+            { id: 'corridor-gap-start', from: [sites[0]!.lng, sites[0]!.lat], to: routeCoords[0]! },
+            {
+              id: 'corridor-gap-end',
+              from: [sites[1]!.lng, sites[1]!.lat],
+              to: routeCoords[routeCoords.length - 1]!,
+            },
+          ];
+          for (const g of gaps) {
+            if (haversineM(g.from, g.to) < 30) continue;
+            m.addSource(g.id, {
+              type: 'geojson',
+              data: {
+                type: 'Feature',
+                properties: {},
+                geometry: { type: 'LineString', coordinates: [g.from, g.to] },
+              },
+            });
+            m.addLayer(
+              {
+                id: g.id,
+                type: 'line',
+                source: g.id,
+                paint: { 'line-color': muted, 'line-width': 1.2, 'line-dasharray': [3, 3] },
+              },
+              'site-fill',
+            );
+          }
+        }
       }
     });
 
@@ -559,8 +628,8 @@ export function FleetMap({
       trailIds.current = active;
     };
 
-    if (m.isStyleLoaded()) paintTrails();
-    else m.once('load', paintTrails);
+    if (styleReady.current) paintTrails();
+    else m.once('style.load', paintTrails);
 
     return () => markers.forEach((mk) => mk.remove());
   }, [vehicles, onVehicleClick]);
